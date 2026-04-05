@@ -34,3 +34,13 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sentinel playback capture store
+/data/
+
+# planning / working notes (not for public repo)
+/SPEC.md
+/GAP-ANALYSIS.md
+
+# claude code local settings
+/.claude/

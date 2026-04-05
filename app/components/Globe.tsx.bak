@@ -1,0 +1,516 @@
+'use client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import * as THREE from 'three';
+// @ts-expect-error - three examples not typed
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+
+export interface FlightData {
+  id: string;
+  callsign: string;
+  lat: number;
+  lng: number;
+  military: boolean;
+}
+
+export interface EarthquakeData {
+  id: string;
+  magnitude: number;
+  place?: string;
+  lat: number;
+  lng: number;
+  depth?: number;
+}
+
+export interface SatelliteData {
+  id: string;
+  name: string;
+  lat: number;
+  lng: number;
+  altitude?: number;
+}
+
+export interface IntelData {
+  id: string;
+  lat?: number;
+  lng?: number;
+  priority: string;
+}
+
+export interface LayerData {
+  flights: FlightData[];
+  earthquakes: EarthquakeData[];
+  satellites: SatelliteData[];
+  intel: IntelData[];
+}
+
+interface GlobeProps {
+  layers: LayerData;
+  activeLayerIds: string[];
+}
+
+interface ClickedItem {
+  type: 'flight' | 'earthquake' | 'satellite' | 'news';
+  data: FlightData | EarthquakeData | SatelliteData | IntelData;
+  screenX: number;
+  screenY: number;
+}
+
+interface ArcObj {
+  line: THREE.Line;
+  tip: THREE.Mesh;
+  curve: THREE.CatmullRomCurve3;
+  progress: number;
+  speed: number;
+}
+
+function latLngToVec3(lat: number, lng: number, radius: number): THREE.Vector3 {
+  const phi = (90 - lat) * (Math.PI / 180);
+  const theta = (lng + 180) * (Math.PI / 180);
+  return new THREE.Vector3(
+    -(radius * Math.sin(phi) * Math.cos(theta)),
+    radius * Math.cos(phi),
+    radius * Math.sin(phi) * Math.sin(theta)
+  );
+}
+
+function createArc(
+  globeGroup: THREE.Group,
+  start: THREE.Vector3,
+  end: THREE.Vector3,
+  color: number,
+  opacity: number
+): ArcObj {
+  const mid = start.clone().add(end).multiplyScalar(0.5).normalize().multiplyScalar(3.2);
+  const curve = new THREE.CatmullRomCurve3([start, mid, end]);
+  const points = curve.getPoints(60);
+  const geometry = new THREE.BufferGeometry().setFromPoints(points);
+  const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity });
+  const line = new THREE.Line(geometry, material);
+  globeGroup.add(line);
+
+  const tipGeometry = new THREE.SphereGeometry(0.025, 8, 8);
+  const tipMaterial = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 });
+  const tip = new THREE.Mesh(tipGeometry, tipMaterial);
+  globeGroup.add(tip);
+
+  return { line, tip, curve, progress: Math.random(), speed: 0.003 + Math.random() * 0.004 };
+}
+
+function removeArc(globeGroup: THREE.Group, arc: ArcObj) {
+  (arc.line.geometry as THREE.BufferGeometry).dispose();
+  (arc.line.material as THREE.Material).dispose();
+  globeGroup.remove(arc.line);
+  (arc.tip.geometry as THREE.BufferGeometry).dispose();
+  (arc.tip.material as THREE.Material).dispose();
+  globeGroup.remove(arc.tip);
+}
+
+function DetailPopup({ item, onClose }: { item: ClickedItem; onClose: () => void }) {
+  const { type, data, screenX, screenY } = item;
+
+  const lines: string[] = [];
+  if (type === 'flight') {
+    const f = data as FlightData;
+    lines.push(`CALLSIGN: ${f.callsign || 'UNKNOWN'}`);
+    lines.push(`TYPE: ${f.military ? 'MILITARY' : 'CIVILIAN'}`);
+    lines.push(`LAT: ${f.lat?.toFixed(2)} / LNG: ${f.lng?.toFixed(2)}`);
+  } else if (type === 'earthquake') {
+    const e = data as EarthquakeData;
+    lines.push(`MAGNITUDE: ${e.magnitude?.toFixed(1)}`);
+    lines.push(`LOCATION: ${e.place || 'UNKNOWN'}`);
+    lines.push(`DEPTH: ${e.depth?.toFixed(1) ?? '?'} km`);
+  } else if (type === 'satellite') {
+    const s = data as SatelliteData;
+    lines.push(`NAME: ${s.name}`);
+    lines.push(`ALT: ${s.altitude ?? '?'} km`);
+    lines.push(`LAT: ${s.lat?.toFixed(2)} / LNG: ${s.lng?.toFixed(2)}`);
+  } else {
+    const n = data as IntelData;
+    lines.push(`PRIORITY: ${n.priority}`);
+    lines.push(`LAT: ${n.lat?.toFixed(2)} / LNG: ${n.lng?.toFixed(2)}`);
+  }
+
+  const left = Math.min(screenX + 10, window.innerWidth - 220);
+  const top = Math.min(screenY - 10, window.innerHeight - 140);
+
+  return (
+    <div style={{
+      position: 'fixed',
+      left,
+      top,
+      width: 200,
+      background: 'rgba(0,8,0,0.95)',
+      border: '1px solid #ff8c00',
+      boxShadow: '0 0 20px rgba(255,140,0,0.3)',
+      padding: '8px 10px',
+      zIndex: 1000,
+      fontFamily: 'JetBrains Mono, monospace',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, borderBottom: '1px solid #1a3a0a', paddingBottom: 4 }}>
+        <span style={{ fontSize: 9, color: '#ff8c00', letterSpacing: '0.15em' }}>◈ {type.toUpperCase()} DETAIL</span>
+        <button
+          onClick={onClose}
+          style={{ background: 'none', border: 'none', color: '#ff4444', cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: 0 }}
+        >✕</button>
+      </div>
+      {lines.map((line, i) => (
+        <div key={i} style={{ fontSize: 9, color: '#00ff41', letterSpacing: '0.1em', marginBottom: 3 }}>{line}</div>
+      ))}
+    </div>
+  );
+}
+
+export default function Globe({ layers, activeLayerIds }: GlobeProps) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const sceneRef = useRef<{
+    scene: THREE.Scene;
+    camera: THREE.PerspectiveCamera;
+    renderer: THREE.WebGLRenderer;
+    controls: InstanceType<typeof OrbitControls>;
+    earthMesh: THREE.Mesh;
+    globeGroup: THREE.Group;
+    pointsGroup: THREE.Group;
+    bordersGroup: THREE.Group;
+    arcs: ArcObj[];
+    pointMeta: Array<{ mesh: THREE.Mesh; type: 'flight' | 'earthquake' | 'satellite' | 'news'; data: FlightData | EarthquakeData | SatelliteData | IntelData }>;
+    animId: number;
+  } | null>(null);
+
+  const [clickedItem, setClickedItem] = useState<ClickedItem | null>(null);
+
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!sceneRef.current || !mountRef.current) return;
+    const { camera, pointMeta } = sceneRef.current;
+    const rect = mountRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
+    raycaster.params.Points = { threshold: 0.05 };
+
+    const meshes = pointMeta.map(p => p.mesh);
+    const hits = raycaster.intersectObjects(meshes);
+    if (hits.length > 0) {
+      const hitMesh = hits[0].object as THREE.Mesh;
+      const meta = pointMeta.find(p => p.mesh === hitMesh);
+      if (meta) {
+        setClickedItem({ type: meta.type, data: meta.data, screenX: e.clientX, screenY: e.clientY });
+      }
+    } else {
+      setClickedItem(null);
+    }
+  }, []);
+
+  // Initialize scene
+  useEffect(() => {
+    if (!mountRef.current) return;
+    const container = mountRef.current;
+    const W = container.clientWidth;
+    const H = container.clientHeight;
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x050508);
+
+    const camera = new THREE.PerspectiveCamera(45, W / H, 0.1, 100);
+    camera.position.set(0, 0, 6);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(W, H);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+
+    // Stars
+    const starsGeo = new THREE.BufferGeometry();
+    const starCount = 3000;
+    const starPositions = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount * 3; i++) starPositions[i] = (Math.random() - 0.5) * 100;
+    starsGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    scene.add(new THREE.Points(starsGeo, new THREE.PointsMaterial({ color: 0x446644, size: 0.05 })));
+
+    const globeGroup = new THREE.Group();
+    scene.add(globeGroup);
+
+    // Earth
+    const earthGeo = new THREE.SphereGeometry(2, 64, 64);
+    const textureLoader = new THREE.TextureLoader();
+    const earthMat = new THREE.MeshPhongMaterial({
+      color: 0x1a3a1a,
+      emissive: 0x0a1a0a,
+      specular: 0x224422,
+      shininess: 10,
+    });
+    const earthMesh = new THREE.Mesh(earthGeo, earthMat);
+    globeGroup.add(earthMesh);
+
+    textureLoader.load(
+      'https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/planets/earth_atmos_2048.jpg',
+      (texture) => {
+        (earthMesh.material as THREE.MeshPhongMaterial).map = texture;
+        (earthMesh.material as THREE.MeshPhongMaterial).needsUpdate = true;
+      },
+      undefined,
+      () => {
+        const wireGeo = new THREE.SphereGeometry(2.01, 24, 24);
+        const wireMat = new THREE.MeshBasicMaterial({ color: 0x003300, wireframe: true });
+        earthMesh.add(new THREE.Mesh(wireGeo, wireMat));
+      }
+    );
+
+    // Atmosphere
+    const atmGeo = new THREE.SphereGeometry(2.15, 64, 64);
+    const atmMat = new THREE.ShaderMaterial({
+      side: 1,
+      transparent: true,
+      opacity: 0.15,
+      vertexShader: `
+        varying vec3 vNormal;
+        void main() {
+          vNormal = normalize(normalMatrix * normal);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vNormal;
+        void main() {
+          float intensity = pow(0.7 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.0);
+          gl_FragColor = vec4(0.0, 1.0, 0.25, 1.0) * intensity;
+        }
+      `,
+    });
+    globeGroup.add(new THREE.Mesh(atmGeo, atmMat));
+
+    scene.add(new THREE.AmbientLight(0x112211, 0.5));
+    const dirLight = new THREE.DirectionalLight(0x44ff44, 0.8);
+    dirLight.position.set(5, 3, 5);
+    scene.add(dirLight);
+
+    const pointsGroup = new THREE.Group();
+    globeGroup.add(pointsGroup);
+
+    const bordersGroup = new THREE.Group();
+    globeGroup.add(bordersGroup);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.enablePan = false;
+    controls.minDistance = 3;
+    controls.maxDistance = 8;
+    controls.autoRotate = false;
+
+    const onResize = () => {
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+    };
+    window.addEventListener('resize', onResize);
+
+    // Load country borders
+    fetch('https://raw.githubusercontent.com/holtzy/D3-graph-gallery/master/DATA/world.geojson')
+      .then(r => r.json())
+      .then((geoData: { features: Array<{ geometry: { type: string; coordinates: number[][][] | number[][][][] } }> }) => {
+        const borderMat = new THREE.LineBasicMaterial({ color: 0x00ff41, opacity: 0.22, transparent: true });
+        geoData.features.forEach(feature => {
+          const { type, coordinates } = feature.geometry;
+          const polys: number[][][][] = type === 'Polygon'
+            ? [coordinates as number[][][]]
+            : coordinates as number[][][][];
+
+          polys.forEach(polygon => {
+            polygon.forEach(ring => {
+              const points: THREE.Vector3[] = [];
+              (ring as number[][]).forEach(([lng, lat]) => {
+                const phi = (90 - lat) * (Math.PI / 180);
+                const theta = (lng + 180) * (Math.PI / 180);
+                points.push(new THREE.Vector3(
+                  -(2.02 * Math.sin(phi) * Math.cos(theta)),
+                  2.02 * Math.cos(phi),
+                  2.02 * Math.sin(phi) * Math.sin(theta)
+                ));
+              });
+              if (points.length > 1) {
+                const geo = new THREE.BufferGeometry().setFromPoints(points);
+                bordersGroup.add(new THREE.Line(geo, borderMat));
+              }
+            });
+          });
+        });
+      })
+      .catch(() => {
+        const gridMat = new THREE.LineBasicMaterial({ color: 0x0a3a0a, opacity: 0.3, transparent: true });
+        for (let lat = -80; lat <= 80; lat += 20) {
+          const pts: THREE.Vector3[] = [];
+          for (let lng = -180; lng <= 180; lng += 5) {
+            pts.push(latLngToVec3(lat, lng, 2.02));
+          }
+          bordersGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+        }
+        for (let lng = -180; lng <= 180; lng += 30) {
+          const pts: THREE.Vector3[] = [];
+          for (let lat = -90; lat <= 90; lat += 5) {
+            pts.push(latLngToVec3(lat, lng, 2.02));
+          }
+          bordersGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), gridMat));
+        }
+      });
+
+    const arcs: ArcObj[] = [];
+
+    let animId = 0;
+    const clock = new THREE.Clock();
+    const animate = () => {
+      animId = requestAnimationFrame(animate);
+      const t = clock.getElapsedTime();
+      globeGroup.rotation.y += 0.0005;
+      controls.update();
+      pointsGroup.children.forEach((child, i) => {
+        if (child instanceof THREE.Mesh) {
+          const scale = 1 + 0.3 * Math.sin(t * 2 + i * 0.5);
+          child.scale.setScalar(scale);
+        }
+      });
+
+      // Animate arc pulses
+      arcs.forEach(arc => {
+        arc.progress = (arc.progress + arc.speed) % 1;
+        const allPoints = arc.curve.getPoints(100);
+        const segStart = Math.floor(arc.progress * 80);
+        const segment = allPoints.slice(segStart, segStart + 20);
+        if (segment.length > 1) {
+          arc.line.geometry.setFromPoints(segment);
+          arc.line.geometry.computeBoundingSphere();
+        }
+        arc.tip.position.copy(arc.curve.getPoint(arc.progress));
+      });
+
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    sceneRef.current = { scene, camera, renderer, controls, earthMesh, globeGroup, pointsGroup, bordersGroup, arcs, pointMeta: [], animId };
+
+    return () => {
+      window.removeEventListener('resize', onResize);
+      cancelAnimationFrame(animId);
+      renderer.dispose();
+      if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  // Update data points
+  useEffect(() => {
+    if (!sceneRef.current) return;
+    const { pointsGroup, globeGroup, arcs } = sceneRef.current;
+    const pointMeta: typeof sceneRef.current.pointMeta = [];
+
+    while (pointsGroup.children.length > 0) {
+      const child = pointsGroup.children[0] as THREE.Mesh;
+      (child.material as THREE.Material).dispose();
+      (child.geometry as THREE.BufferGeometry).dispose();
+      pointsGroup.remove(child);
+    }
+
+    // Collect positions by type for arc generation
+    const flightPositions: THREE.Vector3[] = [];
+    const newsPositions: THREE.Vector3[] = [];
+
+    const addPoints = <T extends { lat: number; lng: number }>(
+      items: T[],
+      color: number,
+      type: 'flight' | 'earthquake' | 'satellite' | 'news',
+      radius = 2.05
+    ) => {
+      const geo = new THREE.SphereGeometry(0.015, 6, 6);
+      items.forEach((item) => {
+        if (item.lat == null || item.lng == null) return;
+        const mat = new THREE.MeshBasicMaterial({ color });
+        const mesh = new THREE.Mesh(geo, mat);
+        const pos = latLngToVec3(item.lat, item.lng, radius);
+        mesh.position.copy(pos);
+        pointsGroup.add(mesh);
+        pointMeta.push({ mesh, type, data: item as unknown as FlightData });
+
+        if (type === 'flight') flightPositions.push(pos.clone());
+        if (type === 'news') newsPositions.push(pos.clone());
+      });
+    };
+
+    if (activeLayerIds.includes('earthquakes')) {
+      addPoints(layers.earthquakes, 0x00ff41, 'earthquake');
+    }
+    if (activeLayerIds.includes('flights')) {
+      addPoints(layers.flights.filter(f => !f.military), 0xff8c00, 'flight', 2.06);
+    }
+    if (activeLayerIds.includes('military')) {
+      addPoints(layers.flights.filter(f => f.military), 0xff4444, 'flight', 2.07);
+    }
+    if (activeLayerIds.includes('satellites')) {
+      addPoints(layers.satellites, 0xffffff, 'satellite', 2.3);
+    }
+    if (activeLayerIds.includes('news')) {
+      const newsPoints = layers.intel.filter(i => i.lat != null && i.lng != null) as unknown as Array<IntelData & { lat: number; lng: number }>;
+      addPoints(newsPoints, 0x4488ff, 'news');
+    }
+
+    sceneRef.current.pointMeta = pointMeta;
+
+    // Remove old arcs
+    const MAX_ARCS = 30;
+    while (arcs.length > MAX_ARCS) {
+      const old = arcs.shift()!;
+      removeArc(globeGroup, old);
+    }
+
+    const shuffle = <T,>(arr: T[]) => arr.slice().sort(() => Math.random() - 0.5);
+    const targetArcCount = 15 + Math.floor(Math.random() * 11);
+
+    if (flightPositions.length >= 2) {
+      const shuffled = shuffle(flightPositions);
+      const pairs = Math.min(Math.floor(targetArcCount * 0.6), Math.floor(shuffled.length / 2));
+      for (let i = 0; i < pairs; i++) {
+        if (arcs.length >= MAX_ARCS) break;
+        const a = shuffled[i * 2];
+        const b = shuffled[i * 2 + 1];
+        if (a && b && a.distanceTo(b) > 0.5) {
+          arcs.push(createArc(globeGroup, a, b, 0x00ff41, 0.4));
+        }
+      }
+    }
+
+    if (newsPositions.length >= 2) {
+      const shuffled = shuffle(newsPositions);
+      const pairs = Math.min(Math.floor(targetArcCount * 0.25), Math.floor(shuffled.length / 2));
+      for (let i = 0; i < pairs; i++) {
+        if (arcs.length >= MAX_ARCS) break;
+        const a = shuffled[i * 2];
+        const b = shuffled[i * 2 + 1];
+        if (a && b && a.distanceTo(b) > 0.5) {
+          arcs.push(createArc(globeGroup, a, b, 0xff8c00, 0.5));
+        }
+      }
+    }
+
+    // Fill remaining with random "unknown signal" arcs
+    const remaining = targetArcCount - arcs.length;
+    for (let i = 0; i < remaining && arcs.length < MAX_ARCS; i++) {
+      const lat1 = (Math.random() - 0.5) * 160;
+      const lng1 = (Math.random() - 0.5) * 360;
+      const lat2 = (Math.random() - 0.5) * 160;
+      const lng2 = (Math.random() - 0.5) * 360;
+      const a = latLngToVec3(lat1, lng1, 2.05);
+      const b = latLngToVec3(lat2, lng2, 2.05);
+      if (a.distanceTo(b) > 1.0) {
+        arcs.push(createArc(globeGroup, a, b, 0xff4444, 0.3));
+      }
+    }
+  }, [layers, activeLayerIds]);
+
+  return (
+    <div style={{ width: '100%', height: '100%', position: 'relative' }} onClick={handleCanvasClick}>
+      <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
+      {clickedItem && <DetailPopup item={clickedItem} onClose={() => setClickedItem(null)} />}
+    </div>
+  );
+}
