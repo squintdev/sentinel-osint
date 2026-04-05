@@ -41,6 +41,11 @@ next-env.d.ts
 # planning / working notes (not for public repo)
 /SPEC.md
 /GAP-ANALYSIS.md
+/CLAUDE.md
 
 # claude code local settings
 /.claude/
+
+# playwright test artifacts
+/.playwright-mcp/
+/sentinel-*.png

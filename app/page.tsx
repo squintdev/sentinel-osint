@@ -5,6 +5,7 @@ import BootSequence from './components/BootSequence';
 import Header from './components/Header';
 import IntelFeed, { IntelItem } from './components/IntelFeed';
 import StatusPanel, { VisualMode } from './components/StatusPanel';
+import TimelineBar, { Mode } from './components/TimelineBar';
 import { LayerData, CameraData } from './components/Globe';
 
 const Globe = dynamic(() => import('./components/Globe'), { ssr: false });
@@ -49,6 +50,14 @@ export default function Home() {
   const [activeLayers, setActiveLayers] = useState(['flights', 'military', 'earthquakes', 'satellites', 'news', 'cameras']);
   const [autoRotate, setAutoRotate] = useState(true);
   const [cityView, setCityView] = useState<{ lat: number; lng: number; distance: number }>({ lat: 0, lng: 0, distance: 6 });
+
+  // Playback mode state — separate from live fetching.
+  const [mode, setMode] = useState<Mode>('live');
+  const [playbackTs, setPlaybackTs] = useState<number>(() => Date.now());
+  const [playbackSpeed, setPlaybackSpeed] = useState<number>(60);
+  const [isPlaying, setIsPlaying] = useState(true);
+  const playbackTsRef = useRef(playbackTs);
+  playbackTsRef.current = playbackTs;
 
   const lastCityView = useRef<{ lat: number; lng: number; distance: number; ts: number } | null>(null);
   const handleCameraMove = useCallback((lat: number, lng: number, distance: number) => {
@@ -117,8 +126,9 @@ export default function Home() {
     } catch {}
   }, []);
 
+  // Live polling: only active when mode === 'live'.
   useEffect(() => {
-    if (!ready) return;
+    if (!ready || mode !== 'live') return;
     fetchFlights();
     fetchEarthquakes();
     fetchSatellites();
@@ -135,7 +145,79 @@ export default function Home() {
       setInterval(fetchCameras, 300000),
     ];
     return () => intervals.forEach(clearInterval);
-  }, [ready, fetchFlights, fetchEarthquakes, fetchSatellites, fetchIntel, fetchGdelt, fetchCameras]);
+  }, [ready, mode, fetchFlights, fetchEarthquakes, fetchSatellites, fetchIntel, fetchGdelt, fetchCameras]);
+
+  // Playback driver: advance playbackTs by (speed * dt) every 100ms while playing.
+  // Pauses automatically when we reach "now" (the LIVE edge).
+  useEffect(() => {
+    if (mode !== 'playback' || !isPlaying) return;
+    const i = setInterval(() => {
+      setPlaybackTs(prev => {
+        const next = prev + 100 * playbackSpeed;
+        if (next >= Date.now()) {
+          setIsPlaying(false);
+          return Date.now();
+        }
+        return next;
+      });
+    }, 100);
+    return () => clearInterval(i);
+  }, [mode, isPlaying, playbackSpeed]);
+
+  // Playback data fetcher: refetch all /api/playback/* every 500ms.
+  // Cameras are NOT refetched — they're live-only (see plan). Whatever was
+  // last-fetched in live mode stays on the globe.
+  useEffect(() => {
+    if (!ready || mode !== 'playback') return;
+    const fetchPlayback = async () => {
+      const t = playbackTsRef.current;
+      try {
+        const [f, e, s, iRes, g] = await Promise.all([
+          fetch(`/api/playback/flights?t=${t}`).then(r => r.json()),
+          fetch(`/api/playback/earthquakes?t=${t}`).then(r => r.json()),
+          fetch(`/api/playback/satellites?t=${t}`).then(r => r.json()),
+          fetch(`/api/playback/intel?t=${t}`).then(r => r.json()),
+          fetch(`/api/playback/gdelt?t=${t}`).then(r => r.json()),
+        ]);
+        setFlights(f.flights || []);
+        setEarthquakes(e.earthquakes || []);
+        setSatellites(s.satellites || []);
+        setIntel(iRes.items || []);
+        setGdeltEvents(g.events || []);
+      } catch { /* ignore */ }
+    };
+    fetchPlayback();
+    const interval = setInterval(fetchPlayback, 500);
+    return () => clearInterval(interval);
+  }, [ready, mode]);
+
+  const handleModeChange = useCallback(async (newMode: Mode) => {
+    setMode(newMode);
+    if (newMode !== 'playback') return;
+    // Switching INTO playback: seek to 30min back IF we have that much capture,
+    // otherwise to earliestTs (so we always land on data, not an empty window).
+    const now = Date.now();
+    const preferred = now - 30 * 60 * 1000;
+    try {
+      const res = await fetch('/api/timeline');
+      const data = await res.json();
+      if (data.earliestTs) {
+        setPlaybackTs(Math.max(preferred, data.earliestTs));
+      } else {
+        // No capture yet — fall back to 5min back; playback APIs will return empty.
+        setPlaybackTs(now - 5 * 60 * 1000);
+      }
+    } catch {
+      setPlaybackTs(preferred);
+    }
+    setIsPlaying(true);
+  }, []);
+
+  const handlePlaybackTsChange = useCallback((ts: number) => {
+    setPlaybackTs(ts);
+    // Pause while user is scrubbing — they can hit play to resume.
+    setIsPlaying(false);
+  }, []);
 
   const handleBootComplete = useCallback(() => {
     setBooting(false);
@@ -229,63 +311,24 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Bottom bar */}
-        <div
-          className="panel"
-          style={{
-            height: 36,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '0 16px',
-            borderTop: '1px solid #0a2a0a',
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: 'flex', gap: 16, alignItems: 'center' }}>
-            <span style={{ fontSize: 9, color: '#1a4a1a', letterSpacing: '0.1em' }}>
-              FLIGHTS: <span className="glow" style={{ fontSize: 9 }}>{flights.length}</span>
-            </span>
-            <span style={{ fontSize: 9, color: '#1a4a1a', letterSpacing: '0.1em' }}>
-              MIL: <span style={{ color: '#ff4444', fontSize: 9 }}>{militaryFlights.length}</span>
-            </span>
-            <span style={{ fontSize: 9, color: '#1a4a1a', letterSpacing: '0.1em' }}>
-              QUAKES: <span className="glow" style={{ fontSize: 9 }}>{earthquakes.length}</span>
-            </span>
-            <span style={{ fontSize: 9, color: '#1a4a1a', letterSpacing: '0.1em' }}>
-              SATS: <span className="glow" style={{ fontSize: 9 }}>{satellites.length}</span>
-            </span>
-            <button
-              onClick={() => setAutoRotate(r => !r)}
-              style={{
-                background: 'none',
-                border: `1px solid ${autoRotate ? '#00ff41' : '#333'}`,
-                color: autoRotate ? '#00ff41' : '#555',
-                cursor: 'pointer',
-                fontSize: 9,
-                letterSpacing: '0.1em',
-                padding: '2px 8px',
-                fontFamily: 'inherit',
-              }}
-            >
-              {autoRotate ? '⟳ ROTATE ON' : '⟳ ROTATE OFF'}
-            </button>
-          </div>
-
-          <div style={{ fontSize: 9, color: '#1a4a1a', letterSpacing: '0.1em' }}>
-            SENTINEL OSINT PLATFORM — AUTHORIZED ACCESS ONLY — CLASSIFICATION: SECRET//NOFORN — <a href="/mobile" style={{ fontSize: 8, color: "#1a3a1a", letterSpacing: "0.1em" }}>📱 MOBILE</a>
-          </div>
-
-          <div style={{ fontSize: 9, letterSpacing: '0.1em', display: 'flex', gap: 8, alignItems: 'center' }}>
-            <span style={{ color: criticalCount > 0 ? '#ff0000' : '#1a4a1a' }}>
-              CRITICAL: <span style={{ color: criticalCount > 0 ? '#ff0000' : '#00ff41' }}>{criticalCount}</span>
-            </span>
-            <span style={{ color: '#333' }}>|</span>
-            <span style={{ color: highCount > 0 ? '#ff8c00' : '#1a4a1a' }}>
-              HIGH: <span style={{ color: highCount > 0 ? '#ff8c00' : '#00ff41' }}>{highCount}</span>
-            </span>
-          </div>
-        </div>
+        <TimelineBar
+          mode={mode}
+          onModeChange={handleModeChange}
+          playbackTs={playbackTs}
+          onPlaybackTsChange={handlePlaybackTsChange}
+          playbackSpeed={playbackSpeed}
+          onPlaybackSpeedChange={setPlaybackSpeed}
+          isPlaying={isPlaying}
+          onPlayPauseToggle={() => setIsPlaying(p => !p)}
+          flightCount={flights.length}
+          militaryCount={militaryFlights.length}
+          quakeCount={earthquakes.length}
+          satCount={satellites.length}
+          criticalCount={criticalCount}
+          highCount={highCount}
+          autoRotate={autoRotate}
+          onAutoRotateToggle={() => setAutoRotate(r => !r)}
+        />
       </div>
     </>
   );
