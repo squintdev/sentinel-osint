@@ -10,6 +10,14 @@ export interface FlightData {
   lat: number;
   lng: number;
   military: boolean;
+  altitude?: number;       // feet
+  speed?: number;          // knots
+  heading?: number;        // degrees
+  squawk?: string;
+  country?: string;
+  type?: string;           // ICAO type code (military feed only)
+  description?: string;    // full aircraft name (military feed only)
+  operator?: string;       // military feed only
 }
 
 export interface EarthquakeData {
@@ -116,9 +124,22 @@ function DetailPopup({ item, onClose }: { item: ClickedItem; onClose: () => void
   const lines: string[] = [];
   if (type === 'flight') {
     const f = data as FlightData;
+    const fmt = (n: number) => n.toLocaleString('en-US');
     lines.push(`CALLSIGN: ${f.callsign || 'UNKNOWN'}`);
-    lines.push(`TYPE: ${f.military ? 'MILITARY' : 'CIVILIAN'}`);
-    lines.push(`LAT: ${f.lat?.toFixed(2)} / LNG: ${f.lng?.toFixed(2)}`);
+    if (f.description) lines.push(`AIRCRAFT: ${f.description}`);
+    else if (f.type) lines.push(`TYPE CODE: ${f.type}`);
+    if (f.operator) lines.push(`OPERATOR: ${f.operator}`);
+    else if (f.country) lines.push(`COUNTRY: ${f.country.toUpperCase()}`);
+    const altSpd: string[] = [];
+    if (f.altitude != null && f.altitude > 0) altSpd.push(`ALT ${fmt(f.altitude)} FT`);
+    if (f.speed != null && f.speed > 0) altSpd.push(`SPD ${Math.round(f.speed)} KT`);
+    if (altSpd.length) lines.push(altSpd.join('  '));
+    const hdgSq: string[] = [];
+    if (f.heading != null) hdgSq.push(`HDG ${String(Math.round(f.heading)).padStart(3, '0')}°`);
+    if (f.squawk) hdgSq.push(`SQ ${f.squawk}`);
+    if (hdgSq.length) lines.push(hdgSq.join('  '));
+    lines.push(`POS: ${f.lat?.toFixed(2)}° / ${f.lng?.toFixed(2)}°`);
+    lines.push(`[${f.military ? 'MILITARY' : 'CIVILIAN'}]`);
   } else if (type === 'earthquake') {
     const e = data as EarthquakeData;
     lines.push(`MAGNITUDE: ${e.magnitude?.toFixed(1)}`);
@@ -557,7 +578,7 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
       // Flights are sprites with directional icons — keep individual but they\'re low count
       layers.flights.filter(f => !f.military).forEach((item) => {
         if (item.lat == null || item.lng == null) return;
-        const sprite = makePlaneSprite('#ff8c00', 0.018);
+        const sprite = makePlaneSprite('#ff8c00', 0.033);
         sprite.position.copy(latLngToVec3(item.lat, item.lng, 2.06));
         pointsGroup.add(sprite as unknown as THREE.Object3D);
         pointMeta.push({ mesh: sprite as unknown as THREE.Object3D, type: 'flight', data: item });
@@ -567,7 +588,7 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
     if (activeLayerIds.includes('military')) {
       layers.flights.filter(f => f.military).forEach((item) => {
         if (item.lat == null || item.lng == null) return;
-        const sprite = makePlaneSprite('#ff4444', 0.03);
+        const sprite = makePlaneSprite('#ff4444', 0.033);
         sprite.position.copy(latLngToVec3(item.lat, item.lng, 2.07));
         pointsGroup.add(sprite as unknown as THREE.Object3D);
         pointMeta.push({ mesh: sprite as unknown as THREE.Object3D, type: 'flight', data: item });

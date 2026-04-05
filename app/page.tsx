@@ -6,18 +6,10 @@ import Header from './components/Header';
 import IntelFeed, { IntelItem } from './components/IntelFeed';
 import StatusPanel, { VisualMode } from './components/StatusPanel';
 import TimelineBar, { Mode } from './components/TimelineBar';
-import { LayerData, CameraData } from './components/Globe';
+import { LayerData, CameraData, FlightData } from './components/Globe';
 
 const Globe = dynamic(() => import('./components/Globe'), { ssr: false });
 const CityMapOverlay = dynamic(() => import('./components/CityMapOverlay'), { ssr: false });
-
-interface FlightItem {
-  id: string;
-  callsign: string;
-  lat: number;
-  lng: number;
-  military: boolean;
-}
 
 interface EarthquakeItem {
   id: string;
@@ -39,7 +31,7 @@ export default function Home() {
   const [booting, setBooting] = useState(true);
   const [ready, setReady] = useState(false);
 
-  const [flights, setFlights] = useState<FlightItem[]>([]);
+  const [flights, setFlights] = useState<FlightData[]>([]);
   const [earthquakes, setEarthquakes] = useState<EarthquakeItem[]>([]);
   const [satellites, setSatellites] = useState<SatelliteItem[]>([]);
   const [intel, setIntel] = useState<IntelItem[]>([]);
