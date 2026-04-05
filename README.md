@@ -1,36 +1,114 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# SENTINEL
 
-## Getting Started
+A full-screen OSINT intelligence dashboard with a CRT/terminal aesthetic. Renders live global data — flight traffic, earthquakes, satellites, news events, GDELT geopolitical events, and public IP cameras — onto a 3D globe, with a 4D playback mode for scrubbing through captured history.
 
-First, run the development server:
+![SENTINEL dashboard](docs/screenshot.png)
+
+## Features
+
+- **3D globe** with live data layers (vanilla Three.js)
+- **Live feeds**:
+  - Flight tracking (civilian + military) — [airplanes.live](https://airplanes.live)
+  - Seismic events — USGS
+  - Satellite positions — computed from orbital elements (ISS, GPS, Starlink, weather sats, etc.)
+  - News intelligence — via local [SearXNG](https://github.com/searxng/searxng) with entity/priority/category classification
+  - GDELT geopolitical events
+  - Public traffic cameras (NYC, London, Caltrans, Toronto, Singapore) + Insecam open IP cams
+- **4D playback mode** — scrub backwards through captured history with play/pause, 1x/10x/60x/600x speed, event-density timeline histogram
+- **Visual modes**: CLEAR, NIGHT, CRT, FLIR
+- **Mobile view** at `/mobile` — stacked layout for phones
+- **Boot sequence** + scanlines + phosphor glow aesthetic
+
+## Stack
+
+- Next.js 14 (App Router) + TypeScript
+- Three.js 0.169 (vanilla, not react-three-fiber)
+- SQLite (better-sqlite3) for playback capture store
+- PM2 for production process management
+
+## Running locally
+
+### Prerequisites
+
+- Node 20+ (developed on 22)
+- A local [SearXNG](https://github.com/searxng/searxng-docker) instance on `http://localhost:8080` for the news intel feed (optional — the app falls back to simulated intel items if unavailable)
+
+### Dev server
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+# → http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Production (port 3201)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm run build
+pm2 start ecosystem.config.js
+pm2 save
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+This launches two PM2 processes:
 
-## Learn More
+- `sentinel` — the Next.js app on port 3201
+- `sentinel-capture` — background daemon snapshotting live APIs into `data/sentinel.db` so playback mode has history to scrub
 
-To learn more about Next.js, take a look at the following resources:
+Playback mode becomes useful after the capture daemon has been running for 30+ minutes. Before that, it will always land on the earliest captured snapshot.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Architecture
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+┌──────────────────────┐     writes      ┌──────────────────┐
+│ sentinel-capture     │ ──────────────▶ │ data/sentinel.db │
+│  (polls live APIs)   │                 │    (SQLite)      │
+└──────────────────────┘                 └────────┬─────────┘
+                                                  │ reads
+                                                  ▼
+┌──────────────────────┐                 ┌──────────────────┐
+│ sentinel (3201)      │ ──── /api/ ───▶ │ playback routes  │
+│  - live mode         │                 └──────────────────┘
+│  - playback mode     │
+└──────────────────────┘
+```
 
-## Deploy on Vercel
+- `app/page.tsx` owns all frontend state and polling intervals (flights 30s, earthquakes 60s, satellites 10s, intel 45s, GDELT 15min, cameras 5min). Same setters feed the Globe from either `/api/*` (live) or `/api/playback/*` (historical) depending on mode.
+- `app/components/Globe.tsx` is vanilla Three.js with OrbitControls. Requires `transpilePackages: ['three']` in `next.config.mjs`.
+- `services/capture/index.ts` is a long-running Node process (via `tsx`) that hits the live API routes on their natural intervals and writes snapshots. Prunes data older than 7 days.
+- Satellites are NOT captured — positions are computed deterministically from orbital elements, so playback recomputes on demand.
+- Cameras are NOT captured either — they're position-static and images are live-only.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Data layout
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+app/
+├── api/
+│   ├── flights/          live feeds
+│   ├── earthquakes/
+│   ├── satellites/
+│   ├── intel/            (SearXNG proxy + enrichment)
+│   ├── gdelt/
+│   ├── cameras/
+│   ├── playback/[resource]/   time-windowed queries against SQLite
+│   └── timeline/         capture-window metadata + event density histogram
+├── components/           Globe, IntelFeed, StatusPanel, TimelineBar, etc.
+├── mobile/               /mobile route with phone-friendly layout
+└── page.tsx              main dashboard
+lib/
+├── orbital.ts            satellite orbital math (shared between live/playback)
+└── playback-db.ts        read-only SQLite singleton
+services/capture/         background capture daemon + SQLite schema
+```
+
+## Credits
+
+Inspired by Bilawal Sidhu's "Worldview" demos.
+
+External APIs used (all free, no keys required):
+
+- [airplanes.live](https://airplanes.live) — ADS-B aircraft tracking
+- [USGS Earthquake Hazards](https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/) — seismic feed
+- [GDELT Project](https://www.gdeltproject.org) — geopolitical events
+- [ArcGIS World Imagery](https://server.arcgisonline.com) — tile layer
+- NYC DOT, Transport for London, Caltrans, City of Toronto, LTA Singapore — traffic cameras
+- [Insecam](http://insecam.org) — public IP cameras
