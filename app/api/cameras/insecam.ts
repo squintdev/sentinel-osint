@@ -78,11 +78,14 @@ async function batchGeoIp(ips: string[]): Promise<GeoResult[]> {
 
 // Country code → display label
 const COUNTRY_LABELS: Record<string, string> = {
-  IL: 'Israel', TR: 'Turkey', LB: 'Lebanon', EG: 'Egypt',
-  JO: 'Jordan', SA: 'Saudi Arabia', IR: 'Iran', SY: 'Syria',
-  IN: 'India', TH: 'Thailand', KR: 'South Korea', JP: 'Japan',
-  HK: 'Hong Kong', ID: 'Indonesia', MY: 'Malaysia', TW: 'Taiwan',
-  CN: 'China', PK: 'Pakistan', VN: 'Vietnam', BD: 'Bangladesh',
+  // Priority set (user-specified)
+  MX: 'Mexico', CA: 'Canada', FR: 'France', DE: 'Germany',
+  CN: 'China', IR: 'Iran', IL: 'Israel', IQ: 'Iraq',
+  SA: 'Saudi Arabia', AE: 'UAE', TW: 'Taiwan', KR: 'South Korea',
+  // Other common codes (kept in case of future use)
+  TR: 'Turkey', LB: 'Lebanon', EG: 'Egypt', JO: 'Jordan', SY: 'Syria',
+  IN: 'India', TH: 'Thailand', JP: 'Japan', HK: 'Hong Kong',
+  ID: 'Indonesia', MY: 'Malaysia', PK: 'Pakistan', VN: 'Vietnam', BD: 'Bangladesh',
 };
 
 export async function fetchInsecamRegion(
