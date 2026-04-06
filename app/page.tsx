@@ -271,7 +271,9 @@ export default function Home() {
                   lat={cityView.lat}
                   lng={cityView.lng}
                   distance={cityView.distance}
-                  visible={cityView.distance < 2.5}
+                  visible={cityView.distance < 3.5}
+                  layers={layers}
+                  activeLayerIds={activeLayers}
                 />
               </>
             )}

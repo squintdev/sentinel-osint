@@ -19,6 +19,8 @@ const TRAFFIC_TTL = 5 * 60 * 1000;
 let insecamCache: { data: Camera[]; ts: number } | null = null;
 const INSECAM_TTL = 2 * 60 * 60 * 1000;
 
+const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
 // ─── Traffic camera sources ───────────────────────────────────────────────────
 
 async function fetchNYC(): Promise<Camera[]> {
@@ -57,44 +59,204 @@ async function fetchLondon(): Promise<Camera[]> {
 
 interface CaltransItem {
   cctv: {
-    location: { streetName?: string; geographicName?: string; coordinates?: { latitude?: number; longitude?: number } };
+    location: { streetName?: string; locationName?: string; nearbyPlace?: string; longitude?: string; latitude?: string };
     imageData?: { static?: { currentImageURL?: string } };
+    inService?: string;
   };
 }
 
+// Caltrans district JSON shape is: { data: [ { cctv: { location, imageData, inService } } ] }
+// The old parser expected data.cctv (an object), which silently returned empty.
 async function fetchCaltrans(district: string, city: string): Promise<Camera[]> {
   const d = district.padStart(2, '0');
-  const res = await fetch(`https://cwwp2.dot.ca.gov/data/d${d}/cctv/cctvStatusD${d}.json`, { cache: 'no-store' });
+  const res = await fetch(`https://cwwp2.dot.ca.gov/data/d${d}/cctv/cctvStatusD${d}.json`, {
+    cache: 'no-store',
+    headers: { 'User-Agent': UA },
+    signal: AbortSignal.timeout(10000),
+  });
   if (!res.ok) return [];
   const json = await res.json();
-  const items: CaltransItem[] = json?.data?.cctv ?? [];
+  const items: CaltransItem[] = Array.isArray(json?.data) ? json.data : [];
   return items.map((item, i) => {
     const cctv = item.cctv;
-    const lat = cctv?.location?.coordinates?.latitude;
-    const lng = cctv?.location?.coordinates?.longitude;
+    if (cctv?.inService === 'false') return null;
+    const lat = parseFloat(String(cctv?.location?.latitude ?? ''));
+    const lng = parseFloat(String(cctv?.location?.longitude ?? ''));
     const imageUrl = cctv?.imageData?.static?.currentImageURL;
-    const name = cctv?.location?.streetName || cctv?.location?.geographicName || `CAM-${i}`;
-    if (!lat || !lng || !imageUrl) return null;
+    const name = cctv?.location?.locationName || cctv?.location?.streetName || cctv?.location?.nearbyPlace || `CAM-${i}`;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng) || !imageUrl) return null;
     return { id: `caltrans-d${d}-${i}`, name, lat, lng, city, imageUrl, online: true } as Camera;
-  }).filter((c): c is Camera => c !== null && !isNaN(c.lat) && !isNaN(c.lng));
+  }).filter((c): c is Camera => c !== null);
+}
+
+interface TorontoFeature {
+  properties: { _id: number; REC_ID: number; IMAGEURL: string; MAINROAD?: string; CROSSROAD?: string };
+  geometry: { type: string; coordinates: number[] | number[][] };
 }
 
 async function fetchToronto(): Promise<Camera[]> {
-  const res = await fetch('https://secure.toronto.ca/opendata/cart/traffic_cameras/v3?format=json', { cache: 'no-store' });
+  // New Toronto Open Data CKAN endpoint — old /opendata/cart/ URL 404s as of 2024.
+  const url = 'https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/a3309088-5fd4-4d34-8297-77c8301840ac/resource/4a568300-c7f8-496d-b150-dff6f5dc6d4f/download/traffic-camera-list-4326.geojson';
+  const res = await fetch(url, { cache: 'no-store', headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(10000) });
   if (!res.ok) return [];
-  const items = await res.json();
-  return (items as Array<{
-    rec_id?: number | string; main?: string; side1?: string;
-    lat?: number; lng?: number; latitude?: number; longitude?: number;
-    url?: string; cameraUrl?: string;
-  }>).map((item, i) => {
-    const lat = item.lat ?? item.latitude;
-    const lng = item.lng ?? item.longitude;
-    const imageUrl = item.url ?? item.cameraUrl;
-    const name = [item.main, item.side1].filter(Boolean).join(' @ ') || `CAM-${i}`;
-    if (!lat || !lng || !imageUrl) return null;
-    return { id: `toronto-${item.rec_id ?? i}`, name, lat, lng, city: 'Toronto', imageUrl, online: true } as Camera;
-  }).filter((c): c is Camera => c !== null && !isNaN(c.lat) && !isNaN(c.lng));
+  const json = await res.json();
+  const feats: TorontoFeature[] = json?.features ?? [];
+  return feats.map((f, i) => {
+    // Toronto uses MultiPoint geometry (coordinates = [[lng, lat]]); also handle Point.
+    const coords = f.geometry?.coordinates;
+    const point = Array.isArray(coords?.[0]) ? (coords[0] as number[]) : (coords as number[] | undefined);
+    const lng = point?.[0];
+    const lat = point?.[1];
+    const img = f.properties?.IMAGEURL;
+    if (lat == null || lng == null || !Number.isFinite(lat) || !Number.isFinite(lng) || !img) return null;
+    const name = [f.properties.MAINROAD, f.properties.CROSSROAD].filter(Boolean).join(' @ ') || `CAM-${i}`;
+    return { id: `toronto-${f.properties.REC_ID}`, name, lat, lng, city: 'Toronto', imageUrl: img, online: true } as Camera;
+  }).filter((c): c is Camera => c !== null);
+}
+
+// Nevada DOT: image URL pattern reverse-engineered from nvroads.com tooltip markup.
+// mapIcons endpoint is public (no bot protection), returns all 644 NV cameras with
+// lat/lng + itemId. Image served at /map/Cctv/{id} as a JPEG.
+interface NvMapIconsResponse {
+  item2: Array<{ itemId: string; location: [number, number]; title: string }>;
+}
+
+// DataTables-backed /List/GetData/Cameras endpoint used by nvroads.com and fl511.com.
+// Server caps each page at 100 records, so we paginate in parallel. Returns a map of
+// camera id → human-readable name (e.g. "US50 @ Sand Springs Summit"). The mapIcons
+// endpoint has `title: ""` for every camera, so this is the only source of real names.
+interface ListDataItem {
+  id?: number | string;
+  DT_RowId?: string;
+  roadway?: string;
+  direction?: string;
+  location?: string;
+  images?: Array<{ description?: string }>;
+}
+async function fetchListNames(baseUrl: string, totalExpected: number): Promise<Map<string, string>> {
+  const pageSize = 100;
+  const pageCount = Math.ceil(totalExpected / pageSize);
+  // Unbounded parallelism triggers rate-limiting (40/47 failures on fl511). Batch
+  // at concurrency 6: safe for both endpoints, ~10s for FL's 4700 cams.
+  const concurrency = 6;
+  const out = new Map<string, string>();
+  const pages = Array.from({ length: pageCount }, (_, i) => i);
+  for (let offset = 0; offset < pages.length; offset += concurrency) {
+    const batch = pages.slice(offset, offset + concurrency);
+    const results = await Promise.allSettled(batch.map(i =>
+      fetch(`${baseUrl}/List/GetData/Cameras`, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'User-Agent': UA,
+          'X-Requested-With': 'XMLHttpRequest',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Accept': 'application/json, text/javascript, */*; q=0.01',
+          'Referer': `${baseUrl}/List/Cameras`,
+        },
+        body: `draw=${i + 1}&start=${i * pageSize}&length=${pageSize}`,
+        signal: AbortSignal.timeout(12000),
+      }).then(r => r.ok ? r.json() : null)
+    ));
+    for (const r of results) {
+      if (r.status !== 'fulfilled' || !r.value) continue;
+      const items: ListDataItem[] = r.value?.data ?? [];
+      for (const it of items) {
+        const id = String(it.id ?? it.DT_RowId ?? '');
+        if (!id) continue;
+        // `roadway` is the cleanest human label ("I-15 @ Sahara", "US50 @ Sand Springs Summit").
+        // `description` (images[0]) sometimes has cross-street detail; fall back to it when
+        // roadway is blank. Append direction when not already present.
+        const roadway = (it.roadway || '').trim();
+        const description = (it.images?.[0]?.description || '').trim();
+        const direction = (it.direction || '').trim();
+        let name = roadway || description;
+        if (name && direction && direction !== 'Unknown' && !name.toLowerCase().includes(direction.toLowerCase())) {
+          name = `${name} ${direction}`;
+        }
+        if (name) out.set(id, name);
+      }
+    }
+  }
+  return out;
+}
+
+function cityForNevada(lat: number, lng: number): string {
+  if (lat >= 39.4 && lat <= 39.75 && lng >= -120.1 && lng <= -119.6) return 'Reno';
+  if (lat >= 35.9 && lat <= 36.35 && lng >= -115.5 && lng <= -114.9) return 'Las Vegas';
+  if (lat >= 39.1 && lat <= 39.25 && lng >= -119.85 && lng <= -119.65) return 'Carson City';
+  if (lat >= 38.95 && lat <= 39.35 && lng >= -120.2 && lng <= -119.85) return 'Lake Tahoe';
+  return 'Nevada';
+}
+
+async function fetchNevada(): Promise<Camera[]> {
+  const res = await fetch('https://www.nvroads.com/map/mapIcons/Cameras', {
+    cache: 'no-store',
+    headers: { 'User-Agent': UA },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) return [];
+  const json = (await res.json()) as NvMapIconsResponse;
+  const items = json?.item2 ?? [];
+  // Enrich in parallel with real names from the List endpoint. If this fails,
+  // we still return cameras — just with the NV-CAM-{id} fallback.
+  const names = await fetchListNames('https://www.nvroads.com', items.length).catch(() => new Map<string, string>());
+  return items
+    .map(c => {
+      const [lat, lng] = c.location ?? [NaN, NaN];
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return {
+        id: `ndot-${c.itemId}`,
+        name: names.get(c.itemId) || c.title || `NV-CAM-${c.itemId}`,
+        lat,
+        lng,
+        city: cityForNevada(lat, lng),
+        imageUrl: `https://www.nvroads.com/map/Cctv/${c.itemId}`,
+        online: true,
+      } as Camera;
+    })
+    .filter((c): c is Camera => c !== null);
+}
+
+// Florida DOT: same GoLive Traffic platform as Nevada. Discovered by probing
+// /map/mapIcons/Cameras on fl511.com. 4695 cameras statewide.
+function cityForFlorida(lat: number, lng: number): string {
+  if (lat >= 25.4 && lat <= 26.0 && lng >= -80.55 && lng <= -80.1) return 'Miami';
+  if (lat >= 26.0 && lat <= 26.5 && lng >= -80.35 && lng <= -80.05) return 'Fort Lauderdale';
+  if (lat >= 26.5 && lat <= 26.9 && lng >= -80.15 && lng <= -80.0) return 'West Palm Beach';
+  if (lat >= 28.3 && lat <= 28.75 && lng >= -81.6 && lng <= -81.1) return 'Orlando';
+  if (lat >= 27.75 && lat <= 28.1 && lng >= -82.75 && lng <= -82.2) return 'Tampa';
+  if (lat >= 30.15 && lat <= 30.5 && lng >= -81.95 && lng <= -81.35) return 'Jacksonville';
+  if (lat >= 30.3 && lat <= 30.55 && lng >= -84.45 && lng <= -84.15) return 'Tallahassee';
+  return 'Florida';
+}
+
+async function fetchFlorida(): Promise<Camera[]> {
+  const res = await fetch('https://fl511.com/map/mapIcons/Cameras', {
+    cache: 'no-store',
+    headers: { 'User-Agent': UA },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) return [];
+  const json = (await res.json()) as NvMapIconsResponse;
+  const items = json?.item2 ?? [];
+  // FL has ~4700 cameras → ~47 parallel list requests. Cached 5 min at call site.
+  const names = await fetchListNames('https://fl511.com', items.length).catch(() => new Map<string, string>());
+  return items
+    .map(c => {
+      const [lat, lng] = c.location ?? [NaN, NaN];
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+      return {
+        id: `fdot-${c.itemId}`,
+        name: names.get(c.itemId) || c.title || `FL-CAM-${c.itemId}`,
+        lat,
+        lng,
+        city: cityForFlorida(lat, lng),
+        imageUrl: `https://fl511.com/map/Cctv/${c.itemId}`,
+        online: true,
+      } as Camera;
+    })
+    .filter((c): c is Camera => c !== null);
 }
 
 async function fetchSingapore(): Promise<Camera[]> {
@@ -121,34 +283,35 @@ async function fetchSingapore(): Promise<Camera[]> {
 export async function GET() {
   const now = Date.now();
 
-  // Fetch traffic cams (short cache)
+  // Fetch traffic cams (short cache). Caltrans returns 500 intermittently per district,
+  // so request several and use Promise.allSettled to survive partial failures.
   if (!trafficCache || now - trafficCache.ts > TRAFFIC_TTL) {
-    const [nyc, london, sf, la, toronto, sg] = await Promise.allSettled([
-      fetchNYC(), fetchLondon(),
-      fetchCaltrans('4', 'San Francisco'), fetchCaltrans('7', 'Los Angeles'),
-      fetchToronto(), fetchSingapore(),
+    const results = await Promise.allSettled([
+      fetchNYC(),
+      fetchLondon(),
+      fetchCaltrans('4', 'San Francisco'),
+      fetchCaltrans('7', 'Los Angeles'),
+      fetchCaltrans('3', 'Sacramento / Truckee'),
+      fetchCaltrans('11', 'San Diego'),
+      fetchCaltrans('12', 'Orange County'),
+      fetchNevada(),
+      fetchFlorida(),
+      fetchToronto(),
+      fetchSingapore(),
     ]);
     trafficCache = {
       ts: now,
-      data: [
-        ...(nyc.status === 'fulfilled' ? nyc.value : []),
-        ...(london.status === 'fulfilled' ? london.value : []),
-        ...(sf.status === 'fulfilled' ? sf.value : []),
-        ...(la.status === 'fulfilled' ? la.value : []),
-        ...(toronto.status === 'fulfilled' ? toronto.value : []),
-        ...(sg.status === 'fulfilled' ? sg.value : []),
-      ],
+      data: results.flatMap(r => r.status === 'fulfilled' ? r.value : []),
     };
   }
 
-  // Fetch insecam cameras (long cache) — Middle East + Asia
+  // Fetch insecam cameras (long cache) — priority countries user asked for.
+  // No TR/LB/EG/IN/TH/JP/HK/ID/MY/VN (dropped from prior set — not in priorities).
   if (!insecamCache || now - insecamCache.ts > INSECAM_TTL) {
     try {
       const raw = await fetchInsecamRegion([
-        // Middle East
-        'IL', 'TR', 'LB', 'EG',
-        // Asia
-        'IN', 'TH', 'KR', 'JP', 'HK', 'ID', 'MY', 'TW', 'VN', 'CN',
+        // Priority non-US countries
+        'MX', 'CA', 'FR', 'DE', 'CN', 'IR', 'IL', 'IQ', 'SA', 'AE', 'TW', 'KR',
       ]);
       insecamCache = {
         ts: now,

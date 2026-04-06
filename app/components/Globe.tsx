@@ -121,6 +121,18 @@ function makePlaneSprite(color: string, size = 0.07): THREE.Sprite {
 function DetailPopup({ item, onClose }: { item: ClickedItem; onClose: () => void }) {
   const { type, data, screenX, screenY } = item;
 
+  // Force camera image refresh every 5s by bumping a counter appended to src.
+  // Most traffic cams update every 30-60s server-side; 5s client polling keeps
+  // the modal feeling live without excessive load.
+  const [refreshTick, setRefreshTick] = useState(0);
+  const [lastFrameAt, setLastFrameAt] = useState<string>('');
+  const [flashKey, setFlashKey] = useState(0);
+  useEffect(() => {
+    if (type !== 'camera') return;
+    const i = setInterval(() => setRefreshTick(t => t + 1), 5000);
+    return () => clearInterval(i);
+  }, [type]);
+
   const lines: string[] = [];
   if (type === 'flight') {
     const f = data as FlightData;
@@ -185,7 +197,9 @@ function DetailPopup({ item, onClose }: { item: ClickedItem; onClose: () => void
         zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center',
       }}>
         <div onClick={e => e.stopPropagation()} style={{
-          width: 640, background: 'rgba(0,8,0,0.97)',
+          width: '80vw', maxWidth: 1400, maxHeight: '85vh',
+          display: 'flex', flexDirection: 'column',
+          background: 'rgba(0,8,0,0.97)',
           border: '1px solid #00ffff',
           boxShadow: '0 0 40px rgba(0,255,255,0.2)',
           fontFamily: 'JetBrains Mono, monospace',
@@ -201,15 +215,47 @@ function DetailPopup({ item, onClose }: { item: ClickedItem; onClose: () => void
             <span style={{ fontSize: 10, color: '#00ffff' }}>{camName}</span>
           </div>
           {camImg && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={camImg} alt={camName}
-              style={{ width: '100%', height: 360, objectFit: 'cover', display: 'block' }}
-              onError={e => { (e.target as HTMLImageElement).src = ''; (e.target as HTMLImageElement).alt = 'Feed unavailable'; }}
-            />
+            <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                // Proxy through our server to force fresh upstream fetch AND defeat
+                // browser caching via Cache-Control: no-store response headers.
+                src={`/api/camera-image?url=${encodeURIComponent(camImg)}&_t=${refreshTick}`}
+                alt={camName}
+                style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }}
+                onError={e => { (e.target as HTMLImageElement).style.opacity = '0.3'; (e.target as HTMLImageElement).alt = 'Feed unavailable'; }}
+                onLoad={e => {
+                  (e.target as HTMLImageElement).style.opacity = '1';
+                  setLastFrameAt(new Date().toISOString().slice(11, 19));
+                  setFlashKey(k => k + 1);
+                }}
+              />
+              {/* Brief cyan flash overlay on each new frame — visual proof the image refreshed */}
+              <div
+                key={flashKey}
+                style={{
+                  position: 'absolute', inset: 0, pointerEvents: 'none',
+                  background: 'rgba(0,255,255,0.15)',
+                  animation: 'cam-flash 0.4s ease-out forwards',
+                }}
+              />
+              <style>{`@keyframes cam-flash { from { opacity: 1; } to { opacity: 0; } }`}</style>
+            </div>
           )}
           <div style={{ padding: '6px 12px', fontSize: 8, color: '#1a4a4a', letterSpacing: '0.1em', display: 'flex', justifyContent: 'space-between' }}>
-            <span>SOURCE: {camCity === 'NYC' ? 'NYC DOT' : camCity === 'London' ? 'TRANSPORT FOR LONDON' : camCity === 'San Francisco' || camCity === 'Los Angeles' ? 'CALTRANS' : camCity === 'Toronto' ? 'CITY OF TORONTO' : camCity === 'Singapore' ? 'LTA DATA.GOV.SG' : 'INSECAM // OPEN IP CAM'}</span>
-            <span style={{ color: '#00ffff' }}>● LIVE</span>
+            <span>SOURCE: {
+              camCity === 'NYC' ? 'NYC DOT' :
+              camCity === 'London' ? 'TRANSPORT FOR LONDON' :
+              camCity === 'San Francisco' || camCity === 'Los Angeles' || camCity === 'Orange County' || camCity === 'San Diego' || camCity === 'Sacramento / Truckee' ? 'CALTRANS' :
+              camCity === 'Reno' || camCity === 'Las Vegas' || camCity === 'Carson City' || camCity === 'Lake Tahoe' || camCity === 'Nevada' ? 'NEVADA DOT' :
+              camCity === 'Miami' || camCity === 'Orlando' || camCity === 'Tampa' || camCity === 'Jacksonville' || camCity === 'Fort Lauderdale' || camCity === 'West Palm Beach' || camCity === 'Tallahassee' || camCity === 'Florida' ? 'FDOT / FL511' :
+              camCity === 'Toronto' ? 'CITY OF TORONTO' :
+              camCity === 'Singapore' ? 'LTA DATA.GOV.SG' :
+              'INSECAM // OPEN IP CAM'
+            }</span>
+            <span style={{ color: '#00ffff' }}>
+              {lastFrameAt ? `FRAME: ${lastFrameAt} UTC` : 'LOADING...'} · ● LIVE
+            </span>
           </div>
         </div>
       </div>
@@ -261,11 +307,154 @@ function DetailPopup({ item, onClose }: { item: ClickedItem; onClose: () => void
   );
 }
 
+// Short label for picker rows: type + best identifier available for each kind
+function shortLabel(item: ClickedItem): { title: string; sub: string; color: string } {
+  if (item.type === 'flight') {
+    const f = item.data as FlightData;
+    return {
+      title: f.callsign || f.type || 'UNKNOWN',
+      sub: f.military ? 'MILITARY' : (f.country?.toUpperCase() || 'CIVILIAN'),
+      color: f.military ? '#ff4444' : '#ff8c00',
+    };
+  }
+  if (item.type === 'camera') {
+    const c = item.data as unknown as CameraData;
+    return { title: c.name, sub: c.city, color: '#00ffff' };
+  }
+  if (item.type === 'earthquake') {
+    const e = item.data as EarthquakeData;
+    return { title: `M ${e.magnitude?.toFixed(1)}`, sub: e.place || '—', color: '#00ff41' };
+  }
+  if (item.type === 'satellite') {
+    const s = item.data as SatelliteData;
+    return { title: s.name, sub: `${s.altitude ?? '?'} km`, color: '#ffffff' };
+  }
+  const n = item.data as IntelData & { goldstein?: number; location?: string; headline?: string };
+  return {
+    title: n.headline?.slice(0, 40) || n.location || 'EVENT',
+    sub: n.goldstein !== undefined ? `SEV ${n.goldstein.toFixed(1)}` : (n.priority || ''),
+    color: '#4488ff',
+  };
+}
+
+function ItemPicker({
+  items, screenX, screenY, onSelect, onClose,
+}: {
+  items: ClickedItem[];
+  screenX: number;
+  screenY: number;
+  onSelect: (item: ClickedItem) => void;
+  onClose: () => void;
+}) {
+  const width = 240;
+  const rowH = 32;
+  const maxH = Math.min(items.length, 8) * rowH + 28;
+  const left = Math.min(screenX + 10, window.innerWidth - width - 10);
+  const top = Math.min(screenY - 10, window.innerHeight - maxH - 10);
+  return (
+    <div onClick={e => e.stopPropagation()} style={{
+      position: 'fixed', left, top, width,
+      background: 'rgba(0,8,0,0.95)',
+      border: '1px solid #00ffff',
+      boxShadow: '0 0 20px rgba(0,255,255,0.25)',
+      zIndex: 1500,
+      fontFamily: 'JetBrains Mono, monospace',
+    }}>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        padding: '6px 10px', borderBottom: '1px solid #003333',
+      }}>
+        <span style={{ fontSize: 9, color: '#00ffff', letterSpacing: '0.15em' }}>
+          ◈ {items.length} ITEMS AT CURSOR
+        </span>
+        <button onClick={onClose} style={{
+          background: 'none', border: 'none', color: '#ff4444',
+          cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: 0,
+        }}>✕</button>
+      </div>
+      <div style={{ maxHeight: 8 * rowH, overflowY: 'auto' }}>
+        {items.map((it, i) => {
+          const { title, sub, color } = shortLabel(it);
+          return (
+            <div
+              key={i}
+              onClick={() => onSelect(it)}
+              style={{
+                padding: '6px 10px', cursor: 'pointer',
+                borderBottom: i < items.length - 1 ? '1px solid #002222' : 'none',
+                display: 'flex', flexDirection: 'column', gap: 2,
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'rgba(0,255,255,0.08)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+            >
+              <div style={{ fontSize: 10, color, letterSpacing: '0.1em' }}>
+                <span style={{ color: '#1a4a4a', marginRight: 6 }}>{it.type.toUpperCase()}</span>
+                {title}
+              </div>
+              <div style={{ fontSize: 8, color: '#1a4a4a', letterSpacing: '0.1em' }}>{sub}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+interface ViewInfo {
+  lat: number;
+  lng: number;
+  distance: number;
+  nearest?: { name: string; city: string; kmAway: number };
+}
+
+function LocationHUD({ info }: { info: ViewInfo }) {
+  // distance 1.2 (max zoom) → ~0 km altitude feel, 8 (max out) → far
+  // Altitude in km: treat globe radius (2 world units) as 6371 km Earth radius
+  const altKm = Math.max(0, (info.distance - 2) * 6371 / 2);
+  const latHemi = info.lat >= 0 ? 'N' : 'S';
+  const lngHemi = info.lng >= 0 ? 'E' : 'W';
+  return (
+    <div style={{
+      position: 'absolute', top: 10, left: 10, zIndex: 10,
+      background: 'rgba(0,8,0,0.75)', border: '1px solid #1a4a4a',
+      padding: '6px 10px', pointerEvents: 'none',
+      fontFamily: 'JetBrains Mono, monospace', fontSize: 9,
+      color: '#00ffff', letterSpacing: '0.12em',
+      minWidth: 180,
+    }}>
+      <div style={{ color: '#1a4a4a', fontSize: 8, marginBottom: 3 }}>◈ VIEW CENTER</div>
+      <div>
+        {Math.abs(info.lat).toFixed(2)}°{latHemi} {Math.abs(info.lng).toFixed(2)}°{lngHemi}
+      </div>
+      <div style={{ color: '#1a4a4a', fontSize: 8, marginTop: 2 }}>
+        ALT {altKm > 999 ? `${(altKm / 1000).toFixed(1)}Mm` : `${Math.round(altKm)}km`}
+      </div>
+      {info.nearest && (
+        <div style={{ marginTop: 5, paddingTop: 4, borderTop: '1px solid #003333' }}>
+          <div style={{ color: '#1a4a4a', fontSize: 8 }}>◉ NEAREST CAM</div>
+          <div style={{ color: '#00ffff', marginTop: 2 }}>{info.nearest.city}</div>
+          <div style={{ color: '#1a4a4a', fontSize: 8, marginTop: 1 }}>
+            {info.nearest.kmAway < 10
+              ? `${info.nearest.kmAway.toFixed(1)} km`
+              : `${Math.round(info.nearest.kmAway)} km`} away
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove }: GlobeProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const autoRotateRef = useRef(autoRotate);
   const onCameraMoveRef = useRef(onCameraMove);
   onCameraMoveRef.current = onCameraMove;
+  // Refs let the (stable) controls 'change' listener read latest layer data
+  // without needing to rebind on every prop change.
+  const layersRef = useRef(layers);
+  const activeLayerIdsRef = useRef(activeLayerIds);
+  layersRef.current = layers;
+  activeLayerIdsRef.current = activeLayerIds;
   const sceneRef = useRef<{
     scene: THREE.Scene;
     camera: THREE.PerspectiveCamera;
@@ -281,6 +470,13 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
   } | null>(null);
 
   const [clickedItem, setClickedItem] = useState<ClickedItem | null>(null);
+  // Picker list shown when a click hits multiple stacked items; user picks one to open
+  const [pickerItems, setPickerItems] = useState<{ items: ClickedItem[]; screenX: number; screenY: number } | null>(null);
+  // HUD info: center of view + nearest camera for location context at close zoom
+  const [viewInfo, setViewInfo] = useState<{ lat: number; lng: number; distance: number; nearest?: { name: string; city: string; kmAway: number } } | null>(null);
+  // Ref so the stable click handler can read the latest viewInfo without rebinding
+  const viewInfoRef = useRef(viewInfo);
+  viewInfoRef.current = viewInfo;
 
   useEffect(() => {
     autoRotateRef.current = autoRotate;
@@ -288,8 +484,87 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
 
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!sceneRef.current || !mountRef.current) return;
-    const { camera, pointMeta } = sceneRef.current;
     const rect = mountRef.current.getBoundingClientRect();
+
+    // ── Map mode (2D overlay active): hit-test using Mercator projection ──
+    const vi = viewInfoRef.current;
+    if (vi && vi.distance < 3.5) {
+      const clickX = e.clientX - rect.left;
+      const clickY = e.clientY - rect.top;
+      const W = rect.width;
+      const H = rect.height;
+      const cx = W / 2;
+      const cy = H / 2;
+      const d = vi.distance;
+      const zoom = d > 2.2 ? 8 : d > 2.0 ? 9 : d > 1.85 ? 10 : d > 1.7 ? 11 : d > 1.55 ? 12 : d > 1.4 ? 13 : 14;
+
+      const totalPx = Math.pow(2, zoom) * 256;
+      const cLngPx = (vi.lng + 180) / 360 * totalPx;
+      const cLatRad = vi.lat * Math.PI / 180;
+      const cLatPx = (1 - Math.log(Math.tan(cLatRad) + 1 / Math.cos(cLatRad)) / Math.PI) / 2 * totalPx;
+
+      const toScreen = (lat: number, lng: number) => {
+        const mLngPx = (lng + 180) / 360 * totalPx;
+        const mLatRad = lat * Math.PI / 180;
+        const mLatPx = (1 - Math.log(Math.tan(mLatRad) + 1 / Math.cos(mLatRad)) / Math.PI) / 2 * totalPx;
+        return { x: cx + (mLngPx - cLngPx), y: cy + (mLatPx - cLatPx) };
+      };
+
+      const threshold = 15; // pixels
+      const matched: ClickedItem[] = [];
+      const ly = layersRef.current;
+      const active = activeLayerIdsRef.current;
+
+      const check = (lat: number, lng: number, type: ClickedItem['type'], data: ClickedItem['data']) => {
+        if (lat == null || lng == null) return;
+        const p = toScreen(lat, lng);
+        if (Math.abs(p.x - clickX) > threshold || Math.abs(p.y - clickY) > threshold) return;
+        const dist = Math.hypot(p.x - clickX, p.y - clickY);
+        if (dist < threshold) {
+          matched.push({ type, data, screenX: e.clientX, screenY: e.clientY });
+        }
+      };
+
+      if (active.includes('cameras') && ly.cameras) {
+        for (const c of ly.cameras) check(c.lat, c.lng, 'camera', c as unknown as ClickedItem['data']);
+      }
+      if (active.includes('flights')) {
+        for (const f of ly.flights) { if (!f.military) check(f.lat, f.lng, 'flight', f); }
+      }
+      if (active.includes('military')) {
+        for (const f of ly.flights) { if (f.military) check(f.lat, f.lng, 'flight', f); }
+      }
+      if (active.includes('earthquakes')) {
+        for (const eq of ly.earthquakes) check(eq.lat, eq.lng, 'earthquake', eq);
+      }
+      if (active.includes('news')) {
+        if (ly.gdelt) { for (const g of ly.gdelt) check(g.lat, g.lng, 'news', g as unknown as ClickedItem['data']); }
+        if (ly.intel) { for (const n of ly.intel) { if (n.lat != null && n.lng != null) check(n.lat, n.lng, 'news', n); } }
+      }
+
+      // Sort by distance to click point so nearest is first
+      matched.sort((a, b) => {
+        const pa = toScreen((a.data as { lat: number }).lat, (a.data as { lng: number }).lng);
+        const pb = toScreen((b.data as { lat: number }).lat, (b.data as { lng: number }).lng);
+        return Math.hypot(pa.x - clickX, pa.y - clickY) - Math.hypot(pb.x - clickX, pb.y - clickY);
+      });
+      if (matched.length > 15) matched.length = 15;
+
+      if (matched.length === 0) {
+        setClickedItem(null);
+        setPickerItems(null);
+      } else if (matched.length === 1) {
+        setClickedItem(matched[0]);
+        setPickerItems(null);
+      } else {
+        setClickedItem(null);
+        setPickerItems({ items: matched, screenX: e.clientX, screenY: e.clientY });
+      }
+      return;
+    }
+
+    // ── Globe mode: 3D raycasting ──
+    const { camera, pointMeta } = sceneRef.current;
     const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
@@ -297,27 +572,44 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
     raycaster.setFromCamera(new THREE.Vector2(x, y), camera);
     raycaster.params.Points = { threshold: 0.04 };
 
-    // Deduplicate meshes for raycasting (InstancedMesh/Points appear multiple times in meta)
     const seen = new Set<THREE.Object3D>();
     const uniqueMeshes: THREE.Object3D[] = [];
     pointMeta.forEach(p => { if (!seen.has(p.mesh)) { seen.add(p.mesh); uniqueMeshes.push(p.mesh); } });
 
     const hits = raycaster.intersectObjects(uniqueMeshes, false);
-    if (hits.length > 0) {
-      const hit = hits[0];
+    const matched: ClickedItem[] = [];
+    const seenKeys = new Set<string>();
+    for (const hit of hits) {
       const hitObj = hit.object;
-      // For InstancedMesh: hit.instanceId; for Points: hit.index; for Mesh/Sprite: undefined
       const hitIdx = (hit as { instanceId?: number; index?: number }).instanceId ?? (hit as { instanceId?: number; index?: number }).index;
       const meta = pointMeta.find(p => {
         if (p.mesh !== hitObj) return false;
         if (hitIdx !== undefined) return p.instanceId === hitIdx;
         return p.instanceId === undefined;
       });
-      if (meta) {
-        setClickedItem({ type: meta.type, data: meta.data, screenX: e.clientX, screenY: e.clientY });
-      }
+      if (!meta) continue;
+      const id = (meta.data as { id?: string }).id ?? '';
+      const key = `${meta.type}-${id}-${meta.instanceId ?? ''}`;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      matched.push({
+        type: meta.type,
+        data: meta.data as ClickedItem['data'],
+        screenX: e.clientX,
+        screenY: e.clientY,
+      });
+      if (matched.length >= 15) break;
+    }
+
+    if (matched.length === 0) {
+      setClickedItem(null);
+      setPickerItems(null);
+    } else if (matched.length === 1) {
+      setClickedItem(matched[0]);
+      setPickerItems(null);
     } else {
       setClickedItem(null);
+      setPickerItems({ items: matched, screenX: e.clientX, screenY: e.clientY });
     }
   }, []);
 
@@ -419,7 +711,6 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
     // Wrapped in RAF so React state update is deferred until after OrbitControls
     // finishes processing its synchronous change event — prevents mid-drag re-render jumps
     controls.addEventListener('change', () => {
-      if (!onCameraMoveRef.current) return;
       const dist = camera.position.length();
       const camNorm = camera.position.clone().normalize();
       const invQ = globeGroup.quaternion.clone().invert();
@@ -430,6 +721,29 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
       const capturedLat = lat, capturedLng = lng, capturedDist = dist;
       requestAnimationFrame(() => {
         if (onCameraMoveRef.current) onCameraMoveRef.current(capturedLat, capturedLng, capturedDist);
+        // Also compute location HUD info: nearest visible camera to the view center
+        let nearest: { name: string; city: string; kmAway: number } | undefined;
+        if (activeLayerIdsRef.current.includes('cameras') && layersRef.current.cameras) {
+          let bestD2 = Infinity;
+          let bestCam: CameraData | null = null;
+          const cosLat = Math.cos(capturedLat * Math.PI / 180);
+          for (const c of layersRef.current.cameras) {
+            if (c.lat == null || c.lng == null) continue;
+            const dLat = c.lat - capturedLat;
+            let dLng = c.lng - capturedLng;
+            // Wrap longitude delta to [-180, 180] so cams near ±180° aren't treated as far
+            if (dLng > 180) dLng -= 360;
+            if (dLng < -180) dLng += 360;
+            // Equirectangular approximation; accurate enough for "nearest" ranking
+            const d2 = dLat * dLat + (dLng * cosLat) * (dLng * cosLat);
+            if (d2 < bestD2) { bestD2 = d2; bestCam = c; }
+          }
+          if (bestCam) {
+            // 1° ≈ 111 km
+            nearest = { name: bestCam.name, city: bestCam.city, kmAway: Math.sqrt(bestD2) * 111 };
+          }
+        }
+        setViewInfo({ lat: capturedLat, lng: capturedLng, distance: capturedDist, nearest });
       });
     });
 
@@ -499,12 +813,29 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
       // Hide atmosphere when camera is inside it — prevents solid green screen fill
       const camDist = camera.position.length();
       atmMesh.visible = camDist >= 2.1;
+      // Hide country borders at close zoom — they use transparent material which
+      // skips depth-write, letting back-hemisphere borders bleed through as bright
+      // green blobs. The CityMapOverlay provides geographic context at this range.
+      bordersGroup.visible = camDist >= 2.5;
+      // Scale rotation + zoom sensitivity with distance: at close zoom, the
+      // visible area is tiny so a small mouse drag maps to a huge angular change.
+      // Quadratic ramp makes it gentle at close zoom, normal at globe view.
+      const zoomT = Math.min(1, (camDist - 1.2) / 5);
+      controls.rotateSpeed = 0.02 + zoomT * zoomT * 0.48;
+      controls.zoomSpeed = 0.3 + zoomT * 1.1;
       controls.update();
       // Pulse flight sprites relative to their stored baseScale
       pointsGroup.children.forEach((child, i) => {
         if (child instanceof THREE.Sprite && !child.userData.noScale && child.userData.baseScale) {
           const s = child.userData.baseScale * (1 + 0.1 * Math.sin(t * 2 + i * 0.5));
           child.scale.setScalar(s);
+        }
+        // Shrink camera/point dots at close zoom so they stop overlapping into an
+        // unusable blob. Linear ramp: full 0.035 at dist>=5, down to 0.005 at dist<=1.5.
+        if (child instanceof THREE.Points) {
+          const mat = child.material as THREE.PointsMaterial;
+          const lerp = Math.max(0, Math.min(1, (camDist - 1.5) / 3.5));
+          mat.size = 0.005 + lerp * 0.030;
         }
       });
       renderer.render(scene, camera);
@@ -657,6 +988,16 @@ export default function Globe({ layers, activeLayerIds, autoRotate, onCameraMove
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }} onClick={handleCanvasClick}>
       <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
+      {viewInfo && viewInfo.distance < 4 && <LocationHUD info={viewInfo} />}
+      {pickerItems && (
+        <ItemPicker
+          items={pickerItems.items}
+          screenX={pickerItems.screenX}
+          screenY={pickerItems.screenY}
+          onSelect={(it) => { setPickerItems(null); setClickedItem(it); }}
+          onClose={() => setPickerItems(null)}
+        />
+      )}
       {clickedItem && <DetailPopup item={clickedItem} onClose={() => setClickedItem(null)} />}
     </div>
   );
