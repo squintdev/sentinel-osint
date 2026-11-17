@@ -2,11 +2,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
 import BootSequence from './components/BootSequence';
-import Header from './components/Header';
+import Header, { FocusMode } from './components/Header';
 import IntelFeed, { IntelItem } from './components/IntelFeed';
 import StatusPanel, { VisualMode } from './components/StatusPanel';
 import TimelineBar, { Mode } from './components/TimelineBar';
-import { LayerData, CameraData, FlightData } from './components/Globe';
+import { LayerData, CameraData, FlightData, CyberAttackData, CyberSourceData } from './components/Globe';
 
 const Globe = dynamic(() => import('./components/Globe'), { ssr: false });
 const CityMapOverlay = dynamic(() => import('./components/CityMapOverlay'), { ssr: false });
@@ -27,6 +27,21 @@ interface SatelliteItem {
   lng: number;
 }
 
+interface CyberKevLite { id: string; cve: string; vendor: string; product: string; ransomware: boolean }
+interface CyberNewsLite { id: string; headline: string; url: string; published: string }
+interface CyberIntelLite { id: string; timestamp: string; category: string; headline: string; source: string; entities: string[]; lat: number | null; lng: number | null; priority: string }
+
+interface CyberState {
+  attacks: CyberAttackData[];
+  sources: CyberSourceData[];
+  kev: CyberKevLite[];
+  news: CyberNewsLite[];
+  intelShape: CyberIntelLite[];
+  stats: { attacks?: number; kevActive?: number };
+}
+
+const EMPTY_CYBER: CyberState = { attacks: [], sources: [], kev: [], news: [], intelShape: [], stats: {} };
+
 export default function Home() {
   const [booting, setBooting] = useState(true);
   const [ready, setReady] = useState(false);
@@ -37,9 +52,21 @@ export default function Home() {
   const [intel, setIntel] = useState<IntelItem[]>([]);
   const [gdeltEvents, setGdeltEvents] = useState<{id:string;lat:number;lng:number;goldstein:number;location:string;actor1:string;priority:string}[]>([]);
   const [cameras, setCameras] = useState<CameraData[]>([]);
+  const [cyber, setCyber] = useState<CyberState>(EMPTY_CYBER);
 
   const [activeMode, setActiveMode] = useState<VisualMode>('clear');
-  const [activeLayers, setActiveLayers] = useState(['flights', 'military', 'earthquakes', 'satellites', 'news', 'cameras']);
+  const [focus, setFocusState] = useState<FocusMode>('all');
+  const [focusReady, setFocusReady] = useState(false);
+  useEffect(() => {
+    const saved = localStorage.getItem('sentinel-focus');
+    if (saved === 'cyber' || saved === 'seismic' || saved === 'news' || saved === 'all') setFocusState(saved as FocusMode);
+    setFocusReady(true);
+  }, []);
+  const setFocus = useCallback((f: FocusMode) => {
+    setFocusState(f);
+    try { localStorage.setItem('sentinel-focus', f); } catch {}
+  }, []);
+  const [activeLayers, setActiveLayers] = useState(['flights', 'military', 'earthquakes', 'satellites', 'news', 'cameras', 'cyber']);
   const [autoRotate, setAutoRotate] = useState(true);
   const [cityView, setCityView] = useState<{ lat: number; lng: number; distance: number }>({ lat: 0, lng: 0, distance: 6 });
 
@@ -118,6 +145,35 @@ export default function Home() {
     } catch {}
   }, []);
 
+  const fetchCyber = useCallback(async () => {
+    try {
+      const res = await fetch('/api/cyber');
+      if (!res.ok) return;
+      const data = await res.json();
+      setCyber({
+        attacks: data.attacks || [],
+        sources: data.sources || [],
+        kev: data.kev || [],
+        news: data.news || [],
+        intelShape: data.intelShape || [],
+        stats: data.stats || {},
+      });
+      // Merge cyber intel items into the shared feed (dedup by id/headline).
+      const items: IntelItem[] = (data.intelShape as CyberIntelLite[]).map((i: CyberIntelLite) => ({
+        id: i.id, timestamp: i.timestamp, category: 'CYBER' as const, headline: i.headline,
+        source: i.source, entities: i.entities || [], lat: i.lat ?? undefined, lng: i.lng ?? undefined,
+        priority: i.priority as IntelItem['priority'],
+      }));
+      if (items.length > 0) {
+        setIntel(prev => {
+          const fresh = items.filter((i: IntelItem) => !prev.find(p => p.id === i.id || p.headline === i.headline));
+          if (fresh.length === 0) return prev;
+          return [...fresh, ...prev].slice(0, 20);
+        });
+      }
+    } catch {}
+  }, []);
+
   // Live polling: only active when mode === 'live'.
   useEffect(() => {
     if (!ready || mode !== 'live') return;
@@ -127,6 +183,7 @@ export default function Home() {
     fetchIntel();
     fetchGdelt();
     fetchCameras();
+    fetchCyber();
 
     const intervals = [
       setInterval(fetchFlights, 30000),
@@ -135,9 +192,10 @@ export default function Home() {
       setInterval(fetchIntel, 45000),
       setInterval(fetchGdelt, 900000),
       setInterval(fetchCameras, 300000),
+      setInterval(fetchCyber, 600000),
     ];
     return () => intervals.forEach(clearInterval);
-  }, [ready, mode, fetchFlights, fetchEarthquakes, fetchSatellites, fetchIntel, fetchGdelt, fetchCameras]);
+  }, [ready, mode, fetchFlights, fetchEarthquakes, fetchSatellites, fetchIntel, fetchGdelt, fetchCameras, fetchCyber]);
 
   // Playback driver: advance playbackTs by (speed * dt) every 100ms while playing.
   // Pauses automatically when we reach "now" (the LIVE edge).
@@ -164,18 +222,20 @@ export default function Home() {
     const fetchPlayback = async () => {
       const t = playbackTsRef.current;
       try {
-        const [f, e, s, iRes, g] = await Promise.all([
+        const [f, e, s, iRes, g, c] = await Promise.all([
           fetch(`/api/playback/flights?t=${t}`).then(r => r.json()),
           fetch(`/api/playback/earthquakes?t=${t}`).then(r => r.json()),
           fetch(`/api/playback/satellites?t=${t}`).then(r => r.json()),
           fetch(`/api/playback/intel?t=${t}`).then(r => r.json()),
           fetch(`/api/playback/gdelt?t=${t}`).then(r => r.json()),
+          fetch(`/api/playback/cyber?t=${t}`).then(r => r.json()).catch(() => ({ attacks: [] })),
         ]);
         setFlights(f.flights || []);
         setEarthquakes(e.earthquakes || []);
         setSatellites(s.satellites || []);
         setIntel(iRes.items || []);
         setGdeltEvents(g.events || []);
+        setCyber(prev => ({ ...prev, attacks: (c.attacks || []) as CyberAttackData[] }));
       } catch { /* ignore */ }
     };
     fetchPlayback();
@@ -229,13 +289,36 @@ export default function Home() {
     intel,
     gdelt: gdeltEvents,
     cameras,
+    cyberAttacks: cyber.attacks,
+    cyberSources: cyber.sources,
   };
+
+  const cyberSummary = cyber.attacks.slice(0, 5).map(a => ({
+    victim: a.victim, group: a.group, countryCode: a.countryCode, sector: a.sector, date: a.date,
+  }));
 
   const criticalCount = intel.filter(i => i.priority === 'CRITICAL').length;
   const highCount = intel.filter(i => i.priority === 'HIGH').length;
   const militaryFlights = flights.filter(f => f.military);
 
   const modeClass = activeMode !== 'clear' ? `mode-${activeMode}` : '';
+
+  // Focus filter: narrows globe layers and both side panels to one feed family.
+  const FOCUS_LAYERS: Record<FocusMode, string[] | null> = {
+    all: null,
+    cyber: ['cyber'],
+    seismic: ['earthquakes'],
+    news: ['news'],
+  };
+  const focusLayers = FOCUS_LAYERS[focus];
+  const effectiveLayers = focusLayers ? focusLayers.filter(l => activeLayers.includes(l)) : activeLayers;
+  const feedItems = focus === 'cyber'
+    ? intel.filter(i => i.category === 'CYBER')
+    : focus === 'news'
+      ? intel.filter(i => i.category !== 'CYBER')
+      : focus === 'seismic' ? [] : intel;
+  const showCyberSummary = focus !== 'seismic' && focus !== 'news';
+  const showQuakeSummary = focus !== 'cyber' && focus !== 'news';
 
   return (
     <>
@@ -253,27 +336,27 @@ export default function Home() {
         }}
       >
         {/* Header */}
-        <Header criticalCount={criticalCount} />
+        <Header criticalCount={criticalCount} focus={focus} onFocusChange={setFocus} />
 
         {/* Main content */}
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', gap: 1, padding: 1 }}>
           {/* Left panel — intel feed */}
           <div style={{ width: 280, flexShrink: 0 }}>
-            <IntelFeed items={intel} />
+            {focus !== 'seismic' && focusReady && <IntelFeed items={feedItems} />}
           </div>
 
           {/* Center — globe */}
           <div style={{ flex: 1, position: 'relative' }}>
             {ready && (
               <>
-                <Globe layers={layers} activeLayerIds={activeLayers} autoRotate={autoRotate} onCameraMove={handleCameraMove} />
+                <Globe layers={layers} activeLayerIds={effectiveLayers} autoRotate={autoRotate} onCameraMove={handleCameraMove} />
                 <CityMapOverlay
                   lat={cityView.lat}
                   lng={cityView.lng}
                   distance={cityView.distance}
                   visible={cityView.distance < 3.5}
                   layers={layers}
-                  activeLayerIds={activeLayers}
+                  activeLayerIds={effectiveLayers}
                 />
               </>
             )}
@@ -296,7 +379,10 @@ export default function Home() {
               satelliteCount={satellites.length}
               newsCount={intel.length}
               cameraCount={cameras.length}
-              recentQuakes={earthquakes}
+              cyberCount={cyber.stats.attacks ?? cyber.attacks.length}
+              kevCount={cyber.stats.kevActive ?? cyber.kev.length}
+              recentQuakes={showQuakeSummary ? earthquakes : []}
+              recentCyber={showCyberSummary ? cyberSummary : []}
               activeMode={activeMode}
               onModeChange={setActiveMode}
               activeLayers={activeLayers}

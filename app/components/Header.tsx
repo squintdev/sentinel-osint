@@ -1,11 +1,22 @@
 'use client';
 import { useEffect, useState } from 'react';
 
+export type FocusMode = 'all' | 'cyber' | 'seismic' | 'news';
+
+const FOCUS_OPTIONS: { id: FocusMode; label: string; color: string }[] = [
+  { id: 'all', label: 'ALL', color: '#00ff41' },
+  { id: 'cyber', label: 'CYBER', color: '#ff2244' },
+  { id: 'seismic', label: 'QUAKES', color: '#ff8c00' },
+  { id: 'news', label: 'NEWS', color: '#4488ff' },
+];
+
 interface HeaderProps {
   criticalCount: number;
+  focus: FocusMode;
+  onFocusChange: (f: FocusMode) => void;
 }
 
-export default function Header({ criticalCount }: HeaderProps) {
+export default function Header({ criticalCount, focus, onFocusChange }: HeaderProps) {
   const [utcTime, setUtcTime] = useState('');
   const [live, setLive] = useState(true);
 
@@ -60,8 +71,30 @@ export default function Header({ criticalCount }: HeaderProps) {
         </span>
       </div>
 
-      {/* Right: threat + live */}
+      {/* Right: focus filter + threat + live */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 20 }}>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {FOCUS_OPTIONS.map(opt => {
+            const on = focus === opt.id;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => onFocusChange(opt.id)}
+                style={{
+                  background: on ? `${opt.color}22` : 'transparent',
+                  border: `1px solid ${on ? opt.color : '#0a2a0a'}`,
+                  color: on ? opt.color : '#1a4a1a',
+                  fontSize: 9, letterSpacing: '0.15em', fontWeight: on ? 700 : 400,
+                  padding: '4px 10px', cursor: 'pointer',
+                  boxShadow: on ? `0 0 8px ${opt.color}44` : 'none',
+                  fontFamily: 'inherit',
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 10, color: '#1a4a1a', letterSpacing: '0.15em' }}>THREAT</span>
           <div style={{ display: 'flex', gap: 2 }}>
