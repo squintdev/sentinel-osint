@@ -104,13 +104,17 @@ export default function EntityGraph({ item, allItems = [], onClose, onFilterByEn
     svg.append('rect').attr('width', W).attr('height', H)
       .attr('fill', 'rgba(0,8,0,0.0)');
 
+    // nodeRadius must be defined before the simulation is created:
+    // forceCollide().radius() invokes the accessor during force.initialize(),
+    // which runs the moment .force('collision', ...) is added. Declaring it
+    // below threw a TDZ ReferenceError when the modal opened.
+    const nodeRadius = (d: GraphNode) => Math.max(6, Math.min(24, 5 + d.freq * 3));
+
     const sim = d3.forceSimulation<GraphNode>(topEntities)
       .force('link', d3.forceLink<GraphNode, GraphLink>(links).id(d => d.id).distance(d => 80 - d.weight * 5).strength(0.6))
       .force('charge', d3.forceManyBody().strength(-180))
       .force('center', d3.forceCenter(W / 2, H / 2))
       .force('collision', d3.forceCollide<GraphNode>().radius(d => nodeRadius(d) + 8));
-
-    const nodeRadius = (d: GraphNode) => Math.max(6, Math.min(24, 5 + d.freq * 3));
 
     // Links
     const linkSel = svg.append('g').selectAll('line')
